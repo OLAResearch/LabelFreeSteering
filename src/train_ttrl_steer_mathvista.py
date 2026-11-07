@@ -940,44 +940,16 @@ def main():
         _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir,
                                 instruction=instruction, extract_fn=extract_fn, lora_sync=lora_sync)
 
-    # 9. Find best checkpoint from per-step eval JSONs
-    best_step, best_ckpt_acc = 0, acc0
-    for jf in sorted(out_dir.glob("eval_step*.json")):
-        try:
-            d = json.loads(jf.read_text())
-            if d.get("acc", 0) > best_ckpt_acc:
-                best_ckpt_acc = d["acc"]
-                best_step = d["step"]
-        except Exception:
-            pass
-    print(f"\nBest checkpoint: step {best_step}  (eval acc={best_ckpt_acc:.4f})")
+    # 9. Sync last-step weights to vLLM (no checkpoint selection on eval accuracy)
+    _lora_req_final = None
+    if llm is not None:
+        if lora_sync is not None:
+            _lora_req_final = lora_sync.sync(model)
+        else:
+            sync_bias_to_vllm_vl(llm, model)
 
-    # Load best checkpoint biases into model (and vLLM)
-    best_ckpt_path = out_dir / f"steering_biases_step{best_step}.pt"
-    if best_step > 0 and best_ckpt_path.exists():
-        print(f"  Loading {best_ckpt_path.name} …")
-        saved = torch.load(best_ckpt_path, map_location="cpu")
-        with torch.no_grad():
-            for name, p in model.named_parameters():
-                if name in saved:
-                    p.copy_(saved[name].to(p.device, p.dtype))
-        _lora_req_final = None
-        if llm is not None:
-            if lora_sync is not None:
-                _lora_req_final = lora_sync.sync(model)
-            else:
-                sync_bias_to_vllm_vl(llm, model)
-    else:
-        print("  No checkpoint found (step 0 was best or file missing) — using current weights")
-        _lora_req_final = None
-        if llm is not None:
-            if lora_sync is not None:
-                _lora_req_final = lora_sync.sync(model)
-            else:
-                sync_bias_to_vllm_vl(llm, model)
-
-    # 10. Final evaluation (full dataset, best checkpoint)
-    print(f"\n{'═'*64}\nFINAL EVAL ({len(dataset)} problems)  [best ckpt: step {best_step}]\n{'═'*64}")
+    # 10. Final evaluation (full dataset, last-step weights)
+    print(f"\n{'═'*64}\nFINAL EVAL ({len(dataset)} problems)  [final step: {args.num_steps}]\n{'═'*64}")
     model.eval()
     acc_final, details_final = evaluate_vl(model, processor, llm, dataset,
                                            args.max_new_tokens, return_details=True,
@@ -988,7 +960,7 @@ def main():
     results = {
         "model_id": args.model_id, "num_steps": args.num_steps, "G": args.G, "lr": args.lr,
         "prompt_format": args.prompt_format,
-        "acc_step0": acc0, "best_step": best_step, "best_ckpt_acc": best_ckpt_acc,
+        "acc_step0": acc0, "final_step": args.num_steps,
         "acc_final": acc_final, "delta": acc_final - acc0,
         "training_log": training_log,
     }

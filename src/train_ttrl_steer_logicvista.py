@@ -418,7 +418,6 @@ def main():
           f"{'vLLM' if llm else 'HF'} generation\n{'═'*64}")
 
     training_log = []
-    best_step, best_ckpt_acc = 0, acc0
     resp_lens, bare_answer_flags = [], []
 
     for step in range(args.num_steps):
@@ -488,9 +487,7 @@ def main():
         if rewards.std() < 1e-6:
             print(f"  step {s1:3d}: skip — all {args.G} rewards equal (ratio={majority_ratio:.2f})")
             training_log.append({"step": s1, "skip": "all_same", "majority_ratio": majority_ratio})
-            acc = _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
-            if acc is not None and acc > best_ckpt_acc:
-                best_ckpt_acc, best_step = acc, s1
+            _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
             continue
 
         advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-6)
@@ -534,24 +531,11 @@ def main():
             "avg_resp_len": avg_len_recent, "bare_rate": bare_rate_recent,
         })
 
-        acc = _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
-        if acc is not None and acc > best_ckpt_acc:
-            best_ckpt_acc, best_step = acc, s1
+        _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
 
-    print(f"\nBest checkpoint: step {best_step}  (eval acc={best_ckpt_acc:.4f})")
-
+    # Final eval always uses the last-step weights (no checkpoint selection on eval accuracy).
     print(f"\n{'═'*64}\nFINAL EVAL ({len(dataset)} problems, training's own {args.grader} grader)  "
-          f"[best ckpt: step {best_step}]\n{'═'*64}")
-    best_ckpt_path = out_dir / f"steering_biases_step{best_step}.pt"
-    if best_step > 0 and best_ckpt_path.exists():
-        print(f"  Loading {best_ckpt_path.name} …")
-        saved = torch.load(best_ckpt_path, map_location="cpu")
-        with torch.no_grad():
-            for name, p in model.named_parameters():
-                if name in saved:
-                    p.copy_(saved[name].to(p.device, p.dtype))
-    else:
-        print("  No checkpoint found (step 0 was best or file missing) — using current weights")
+          f"[final step: {args.num_steps}]\n{'═'*64}")
     model.eval()
     _lora_req_final = None
     if llm is not None:
@@ -566,14 +550,14 @@ def main():
           f"[training's own {args.grader} grader -- NOT the citable number, see "
           f"eval_logicvista.py for the official-protocol full-dataset pass]")
     (out_dir / "eval_final.json").write_text(
-        json.dumps({"step": best_step, "acc": acc_final, "n": len(dataset),
+        json.dumps({"step": args.num_steps, "acc": acc_final, "n": len(dataset),
                     "n_parse_failed": nfail_final, "details": details_final}, indent=2))
 
     results = {
         "model_id": args.model_id, "num_steps": args.num_steps, "G": args.G, "lr": args.lr,
         "prompt_format": args.prompt_format, "grader": args.grader,
         "dataset": "LogicVista (lscpku/LogicVista, test split)",
-        "acc_step0": acc0, "best_step": best_step, "best_ckpt_acc": best_ckpt_acc,
+        "acc_step0": acc0, "final_step": args.num_steps,
         "acc_final": acc_final, "delta": acc_final - acc0,
         "mean_resp_len_overall": sum(resp_lens) / max(1, len(resp_lens)),
         "bare_answer_rate_overall": sum(bare_answer_flags) / max(1, len(bare_answer_flags)),

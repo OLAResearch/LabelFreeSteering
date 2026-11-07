@@ -415,7 +415,6 @@ def main():
           f"{'vLLM' if llm else 'HF'} generation\n{'═'*64}")
 
     training_log = []
-    best_step, best_ckpt_acc = 0, acc0
 
     for step in range(args.num_steps):
         sample   = train_samples[step % len(train_samples)]
@@ -473,9 +472,7 @@ def main():
         if rewards.std() < 1e-6:
             print(f"  step {s1:3d}: skip — all {args.G} rewards equal (ratio={majority_ratio:.2f})")
             training_log.append({"step": s1, "skip": "all_same", "majority_ratio": majority_ratio})
-            acc = _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
-            if acc is not None and acc > best_ckpt_acc:
-                best_ckpt_acc, best_step = acc, s1
+            _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
             continue
 
         advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-6)
@@ -515,23 +512,10 @@ def main():
             "n_match": n_match, "majority_ratio": majority_ratio, "grad_norm": float(grad_norm),
         })
 
-        acc = _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
-        if acc is not None and acc > best_ckpt_acc:
-            best_ckpt_acc, best_step = acc, s1
+        _do_checkpoint_and_eval(s1, model, processor, llm, eval_samples, args, out_dir, extract_fn, lora_sync=lora_sync)
 
-    print(f"\nBest checkpoint: step {best_step}  (eval acc={best_ckpt_acc:.4f})")
-
-    print(f"\n{'═'*64}\nFINAL EVAL ({len(dataset)} problems)  [best ckpt: step {best_step}]\n{'═'*64}")
-    best_ckpt_path = out_dir / f"steering_biases_step{best_step}.pt"
-    if best_step > 0 and best_ckpt_path.exists():
-        print(f"  Loading {best_ckpt_path.name} …")
-        saved = torch.load(best_ckpt_path, map_location="cpu")
-        with torch.no_grad():
-            for name, p in model.named_parameters():
-                if name in saved:
-                    p.copy_(saved[name].to(p.device, p.dtype))
-    else:
-        print("  No checkpoint found (step 0 was best or file missing) — using current weights")
+    # Final eval always uses the last-step weights (no checkpoint selection on eval accuracy).
+    print(f"\n{'═'*64}\nFINAL EVAL ({len(dataset)} problems)  [final step: {args.num_steps}]\n{'═'*64}")
     model.eval()
     _lora_req_final = None
     if llm is not None:
@@ -544,14 +528,14 @@ def main():
         prompt_format=args.prompt_format, extract_fn=extract_fn, lora_request=_lora_req_final)
     print(f"\n★  final pass@1 = {acc_final:.4f}  (Δ vs step-0 = {acc_final - acc0:+.4f})")
     (out_dir / "eval_final.json").write_text(
-        json.dumps({"step": best_step, "acc": acc_final, "n": len(dataset),
+        json.dumps({"step": args.num_steps, "acc": acc_final, "n": len(dataset),
                     "n_parse_failed": nfail_final, "details": details_final}, indent=2))
 
     results = {
         "model_id": args.model_id, "num_steps": args.num_steps, "G": args.G, "lr": args.lr,
         "prompt_format": args.prompt_format, "grader": args.grader,
         "dataset": "AI2D (lmms-lab-encoder/ai2d, test split)",
-        "acc_step0": acc0, "best_step": best_step, "best_ckpt_acc": best_ckpt_acc,
+        "acc_step0": acc0, "final_step": args.num_steps,
         "acc_final": acc_final, "delta": acc_final - acc0, "training_log": training_log,
     }
     (out_dir / "results.json").write_text(json.dumps(results, indent=2))
