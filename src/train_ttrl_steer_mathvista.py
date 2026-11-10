@@ -105,10 +105,17 @@ def _strip_units(text: str) -> str:
 
 def normalize_answer(text: str) -> str:
     text = str(text).lower().strip()
-    text = _strip_units(text)
+    text = _strip_units(text).replace("−", "-")
     keep = set("./")
-    text = "".join(c for c in text if c not in string.punctuation or c in keep)
+    # Keep a minus sign that starts a number ("-7"), so "-7" and "7" stay distinct.
+    text = "".join(c for i, c in enumerate(text)
+                   if c not in string.punctuation or c in keep or _is_sign(text, i))
     return " ".join(text.split())
+
+
+def _is_sign(text: str, i: int) -> bool:
+    return (text[i] == "-" and i + 1 < len(text) and (text[i + 1].isdigit() or text[i + 1] == ".")
+            and (i == 0 or not text[i - 1].isalnum()))
 
 
 def _try_numeric(text: str):
